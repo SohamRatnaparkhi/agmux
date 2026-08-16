@@ -30,7 +30,19 @@ done
 # ── bootstrap ───────────────────────────────────────────────────────────────
 # Piped from curl there is no repo around us, so fetch one and re-exec from it.
 # ${BASH_SOURCE:-} is empty under `curl | bash`, which is the tell.
-REPO="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd || true)"
+# Resolve our own location, but ONLY from a real file on disk. Under
+# `curl | bash` there is no script file: BASH_SOURCE[0] is the string "bash",
+# and `dirname bash` is ".", so a naive resolve silently yields the user's
+# CURRENT WORKING DIRECTORY. If that directory happened to contain bin/agmux
+# the installer would install from it and never clone — which is exactly what
+# happened while testing this, from inside the repo, making the bootstrap look
+# like it worked when it had not run at all.
+SRC_FILE="${BASH_SOURCE[0]:-}"
+if [ -n "$SRC_FILE" ] && [ -f "$SRC_FILE" ]; then
+  REPO="$(cd "$(dirname "$SRC_FILE")" && pwd)"
+else
+  REPO=""
+fi
 if [ -z "$REPO" ] || [ ! -f "$REPO/bin/agmux" ]; then
   command -v git >/dev/null || { echo "git is required to bootstrap" >&2; exit 1; }
   DEST="${AGMUX_SRC:-$HOME/.local/share/agmux}"
