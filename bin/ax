@@ -10,6 +10,7 @@
 #   ax path         pick a repo, print its absolute path (for `p` shell func)
 #   ax status       tiny status-bar summary, cached ("✋2 ▶5")
 #   ax repos        refresh the repo cache
+#   ax clean        remove finished worktrees (in-use/dirty/unmerged are kept)
 #   ax web on|off   browser terminal at your tailnet URL (ttyd + tailscale serve)
 #   ax jump <pane>  focus a pane by id (used by menu)
 set -uo pipefail
@@ -218,6 +219,43 @@ cmd_status() {
   else printf '·'; fi
 }
 
+# Remove worktrees that are safe to drop. A worktree is kept if any tmux pane
+# is inside it (agent still running), it has uncommitted changes, or its branch
+# has commits not yet in the main checkout's branch (prints the merge command).
+cmd_clean() {
+  local wt branch mainwt base ahead cwds removed=0 kept=0
+  cwds="$(tmux list-panes -a -F '#{pane_current_path}' 2>/dev/null)"
+  for wt in "$WT_DIR"/*/; do
+    [ -d "$wt" ] || continue
+    wt="${wt%/}"
+    if printf '%s\n' "$cwds" | awk -v p="$wt" 'index($0,p)==1{f=1} END{exit !f}'; then
+      printf 'keep    %-40s (agent pane inside)\n' "$(basename "$wt")"; kept=$((kept+1)); continue
+    fi
+    if [ -n "$(git -C "$wt" status --porcelain 2>/dev/null)" ]; then
+      printf 'keep    %-40s (uncommitted changes)\n' "$(basename "$wt")"; kept=$((kept+1)); continue
+    fi
+    branch="$(git -C "$wt" branch --show-current 2>/dev/null)"
+    mainwt="$(git -C "$wt" worktree list --porcelain 2>/dev/null | awk '$1=="worktree"{print $2; exit}')"
+    [ -z "$mainwt" ] && { printf 'skip    %-40s (not a worktree?)\n' "$(basename "$wt")"; continue; }
+    base="$(git -C "$mainwt" symbolic-ref --short HEAD 2>/dev/null || echo main)"
+    ahead="$(git -C "$wt" rev-list --count "$base..HEAD" 2>/dev/null || echo '?')"
+    if [ "$ahead" = "0" ]; then
+      if git -C "$mainwt" worktree remove "$wt" 2>/dev/null; then
+        [ -n "$branch" ] && git -C "$mainwt" branch -d "$branch" >/dev/null 2>&1
+        printf 'removed %-40s (merged / no unique commits)\n' "$(basename "$wt")"
+        removed=$((removed+1))
+      else
+        printf 'keep    %-40s (git refused removal)\n' "$(basename "$wt")"; kept=$((kept+1))
+      fi
+    else
+      printf 'keep    %-40s (%s commits not in %s)\n' "$(basename "$wt")" "$ahead" "$base"
+      printf '        merge with: git -C %s merge %s   then re-run ax clean\n' "$mainwt" "$branch"
+      kept=$((kept+1))
+    fi
+  done
+  printf -- '-- removed %s, kept %s\n' "$removed" "$kept"
+}
+
 cmd_web() {
   local ts_ip tsout
   case "${1:-on}" in
@@ -261,6 +299,7 @@ case "${1:-pick}" in
   pick|"") cmd_pick;;
   new) cmd_new;;
   here) cmd_here;;
+  clean) cmd_clean;;
   menu) cmd_menu;;
   path) repos | fzf --prompt='repo> ' | sed "s|^|$PROJECTS/|";;
   status) cmd_status;;

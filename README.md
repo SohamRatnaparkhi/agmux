@@ -40,6 +40,7 @@ Prefix is `C-a`.
 | `an` | Spawn an agent (same as `C-a n`) |
 | `ax web on\|off` | Browser terminal over Tailscale |
 | `ax repos` | Refresh the repo cache (auto-refreshes every 6h) |
+| `ax clean` | Remove finished worktrees — keeps any with an agent inside, uncommitted changes, or unmerged commits (prints the merge command for those) |
 
 ### Base tmux
 
