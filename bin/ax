@@ -24,6 +24,19 @@ grok
 codex
 pi
 shell"
+
+# full launch command per agent: auto-approve/skip-permissions variants
+# (flags verified against the installed binaries)
+launch_cmd() {
+  case "$1" in
+    claude)   echo "claude --dangerously-skip-permissions";;
+    codex)    echo "codex --dangerously-bypass-approvals-and-sandbox";;
+    opencode) echo "opencode --auto";;
+    grok)     echo "grok --always-approve";;
+    pi)       echo "pi";;  # pi has no tool-approval gating
+    *)        echo "$1";;
+  esac
+}
 # ttys hosting an agent process: binaries by comm name, plus `pi` (a node script,
 # so comm=node; match the invoked path in the command column instead)
 agent_ttys() {
@@ -152,7 +165,7 @@ spawn_in() { # $1 = absolute repo dir
       fi
     fi
     tmux new-window -t "=$sess" -n "${agent}·${task}" -c "$dir"
-    tmux send-keys -t "=$sess" "$agent" Enter
+    tmux send-keys -t "=$sess" "$(launch_cmd "$agent")" Enter
   fi
 
   if [ -n "${TMUX:-}" ]; then tmux switch-client -t "=$sess"; else tmux attach -t "=$sess"; fi
