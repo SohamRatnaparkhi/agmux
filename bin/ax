@@ -1,0 +1,259 @@
+#!/usr/bin/env bash
+# ax — a thin manager layer over tmux for coding agents (claude/opencode/grok/codex/pi).
+# It never talks to the agents themselves; it only lists/creates tmux panes and,
+# for Claude, reads the public `claude agents --json` roster for blocked/busy glyphs.
+#
+#   ax              picker: fuzzy-jump to any running agent (blocked first)
+#   ax new          spawn an agent: pick repo -> pick agent -> optional worktree
+#   ax here         spawn an agent in the current repo (skips the repo picker)
+#   ax menu         tap-friendly tmux display-menu of agents (mobile)
+#   ax path         pick a repo, print its absolute path (for `p` shell func)
+#   ax status       tiny status-bar summary, cached ("✋2 ▶5")
+#   ax repos        refresh the repo cache
+#   ax web on|off   browser terminal at your tailnet URL (ttyd + tailscale serve)
+#   ax jump <pane>  focus a pane by id (used by menu)
+set -uo pipefail
+
+AX_HOME="$HOME/.ax"
+CACHE="$AX_HOME/repos"
+WT_DIR="$AX_HOME/worktrees"
+PROJECTS="$HOME/projects"
+AGENT_CHOICES="claude
+opencode
+grok
+codex
+pi
+shell"
+# ttys hosting an agent process: binaries by comm name, plus `pi` (a node script,
+# so comm=node; match the invoked path in the command column instead)
+agent_ttys() {
+  { ps -axo tty=,comm= | awk '$2 ~ /^(claude|opencode|grok|codex)$/ {print $1}'
+    ps -axo tty=,command= | awk '{for(i=2;i<=3&&i<=NF;i++) if ($i=="pi" || $i ~ /\/pi$/) {print $1; break}}'
+  } | sort -u
+}
+
+mkdir -p "$AX_HOME" "$WT_DIR"
+
+# ---------- repo discovery ----------
+scan_repos() {
+  fd -H -t d --max-depth 6 '^\.git$' "$PROJECTS" 2>/dev/null \
+    | sed -e 's|/\.git/*$||' -e "s|^$PROJECTS/||" | sort > "$CACHE.tmp" \
+    && mv "$CACHE.tmp" "$CACHE"
+}
+
+repos() {
+  if [ ! -s "$CACHE" ]; then scan_repos
+  elif [ -n "$(find "$CACHE" -mmin +360 2>/dev/null)" ]; then (scan_repos &) fi
+  cat "$CACHE"
+}
+
+# session name: <workspace>/<leaf>, sanitized for tmux (no '.' or ':')
+sess_name() { # $1 = repo relpath
+  local ws leaf
+  ws="${1%%/*}"; leaf="$(basename "$1")"
+  printf '%s/%s' "$ws" "$leaf" | tr '.:' '--'
+}
+
+# ---------- claude roster (public JSON surface, read-only) ----------
+# emits: <tty-basename> <status> <waitingFor>
+claude_roster() {
+  claude agents --json 2>/dev/null | jq -r '
+    .[] | select(.pid != null)
+        | [(.pid|tostring), (.status // "?"), (.waitingFor // "-")] | @tsv' 2>/dev/null \
+  | while IFS=$'\t' read -r pid status wf; do
+      tty="$(ps -o tty= -p "$pid" 2>/dev/null | tr -d ' ')"
+      [ -n "$tty" ] && [ "$tty" != "??" ] && printf '%s\t%s\t%s\n' "$tty" "$status" "${wf// /_}"
+    done
+}
+
+# ---------- agent pane listing ----------
+# emits sorted lines: <rank>\t<glyph> <label>\t<sess>:<win>\t<pane_id>
+agent_panes() {
+  local panes procs roster
+  panes="$(tmux list-panes -a -F '#{pane_id}	#{session_name}	#{window_index}	#{window_name}	#{pane_tty}	#{pane_current_path}	#{pane_title}' 2>/dev/null)" || return 0
+  procs="$(agent_ttys)"
+  roster="$(claude_roster)"
+
+  printf '%s\n' "$panes" | while IFS=$'\t' read -r pid sess win wname ptty ppath ptitle; do
+    tty_base="${ptty##*/}"
+    printf '%s\n' "$procs" | grep -qx "$tty_base" || continue
+    status="run"; wf="-"
+    line="$(printf '%s\n' "$roster" | awk -F'\t' -v t="$tty_base" '$1==t {print $2"\t"$3; exit}')"
+    [ -n "$line" ] && { status="${line%%	*}"; wf="${line#*	}"; }
+    # codex publishes blocked state in its terminal title (first-class, not scraping)
+    case "$ptitle" in *"Action Required"*) status="waiting"; wf="approval";; esac
+    case "$status" in
+      waiting) rank=0; glyph="✋";;
+      busy|working) rank=1; glyph="▶";;
+      idle) rank=2; glyph="·";;
+      *) rank=1; glyph="▶";;
+    esac
+    rel="${ppath#"$PROJECTS"/}"
+    if [ "$rel" = "$ppath" ]; then
+      case "$ppath" in "$HOME"*) rel="~${ppath#"$HOME"}";; *) rel="$ppath";; esac
+    fi
+    extra=""; [ "$wf" != "-" ] && extra=" (${wf//_/ })"
+    printf '%s\t%s %s  %s%s\t%s:%s\t%s\n' "$rank" "$glyph" "$wname" "$rel" "$extra" "$sess" "$win" "$pid"
+  done | sort -t"$(printf '\t')" -k1,1 -k2,2
+}
+
+focus() { # $1 = pane_id
+  local target
+  target="$(tmux display-message -p -t "$1" '#{session_name}:#{window_index}')" || return 1
+  tmux select-pane -t "$1"
+  if [ -n "${TMUX:-}" ]; then tmux switch-client -t "$target"
+  else tmux attach -t "$target"; fi
+}
+
+# ---------- commands ----------
+cmd_pick() {
+  local sel pane
+  sel="$(agent_panes | fzf --ansi --delimiter='\t' --with-nth=2,3 \
+        --prompt='agents> ' --header='enter: jump · agents sorted blocked-first' \
+        --preview='tmux capture-pane -ep -t {4} | tail -25' --preview-window=down,60%)" || return 0
+  pane="$(printf '%s' "$sel" | awk -F'\t' '{print $4}')"
+  [ -n "$pane" ] && focus "$pane"
+}
+
+spawn_in() { # $1 = absolute repo dir
+  local dir="$1" agent sess leaf rel task mode wt n
+  agent="$(printf '%s\n' "$AGENT_CHOICES" | fzf --prompt='agent> ' --header="spawn in $(basename "$dir")")" || return 0
+  [ -z "$agent" ] && return 0
+
+  rel="${dir#"$PROJECTS"/}"; leaf="$(basename "$dir")"
+  if [ "$rel" != "$dir" ]; then sess="$(sess_name "$rel")"; else sess="$(printf '%s' "$leaf" | tr '.:' '--')"; fi
+
+  if ! tmux has-session -t "=$sess" 2>/dev/null; then
+    tmux new-session -d -s "$sess" -c "$dir" -n shell
+  fi
+
+  if [ "$agent" = "shell" ]; then
+    tmux new-window -t "=$sess" -c "$dir"
+  else
+    printf 'task name (short, for window/branch): '
+    read -r task || true
+    task="$(printf '%s' "${task:-$(date +%H%M%S)}" | tr -c 'a-zA-Z0-9-' '-' | sed 's/-*$//')"
+    [ -z "$task" ] && task="$(date +%H%M%S)"
+
+    # if the repo already hosts an agent, default to an isolated worktree
+    n="$(tmux list-windows -t "=$sess" -F '#{window_name}' | grep -c '·' || true)"
+    mode="shared checkout"
+    if [ "$n" -gt 0 ] && git -C "$dir" rev-parse --git-dir >/dev/null 2>&1; then
+      mode="$(printf 'isolated worktree (recommended)\nshared checkout' \
+        | fzf --prompt='workdir> ' --header="$n agent(s) already in $leaf")" || return 0
+    fi
+    if [ "${mode%% *}" = "isolated" ]; then
+      wt="$WT_DIR/${leaf}-${task}"
+      if git -C "$dir" worktree add -b "ax/${task}" "$wt" >/dev/null 2>&1 \
+         || git -C "$dir" worktree add "$wt" >/dev/null 2>&1; then
+        dir="$wt"
+      else
+        printf 'worktree failed, using shared checkout\n'; sleep 1
+      fi
+    fi
+    tmux new-window -t "=$sess" -n "${agent}·${task}" -c "$dir"
+    tmux send-keys -t "=$sess" "$agent" Enter
+  fi
+
+  if [ -n "${TMUX:-}" ]; then tmux switch-client -t "=$sess"; else tmux attach -t "=$sess"; fi
+}
+
+cmd_new() {
+  local repo
+  repo="$(repos | fzf --prompt='repo> ' --header='where should the agent run?')" || return 0
+  [ -z "$repo" ] && return 0
+  spawn_in "$PROJECTS/$repo"
+}
+
+# spawn in the repo you're already standing in — no repo picker
+cmd_here() {
+  local root
+  root="$(git rev-parse --show-toplevel 2>/dev/null)" || root="$PWD"
+  spawn_in "$root"
+}
+
+cmd_menu() {
+  local i=0 args=() rank rest label target pane
+  args=(display-menu -T " agents ")
+  while IFS=$'\t' read -r rank label target pane; do
+    [ -z "$pane" ] && continue
+    i=$((i+1)); [ "$i" -gt 8 ] && break
+    args+=("$label ($target)" "$i" "run-shell 'ax jump $pane'")
+  done < <(agent_panes)
+  [ "$i" -eq 0 ] && args+=("no agents running" "" "")
+  args+=("" "＋ new agent" n "display-popup -E -w 90% -h 75% 'ax new'")
+  args+=("⌕ picker" a "display-popup -E -w 95% -h 80% 'ax'")
+  tmux "${args[@]}"
+}
+
+refresh_status() {
+  claude agents --json 2>/dev/null | jq -r '
+    [([.[] | select(.status=="waiting")] | length),
+     ([.[] | select(.status=="busy" or .status=="working")] | length)] | @tsv' \
+    2>/dev/null > "$AX_HOME/status.tmp" && mv "$AX_HOME/status.tmp" "$AX_HOME/status"
+}
+
+cmd_status() {
+  # never block the status bar: print the cache, refresh in the background if stale
+  local f="$AX_HOME/status" blocked=0 busy=0 age now mtime
+  now="$(date +%s)"; mtime="$(stat -f %m "$f" 2>/dev/null || echo 0)"
+  age=$(( now - mtime ))
+  [ "$age" -ge 5 ] && [ ! -f "$f.tmp" ] && (refresh_status &)
+  [ -f "$f" ] && { IFS=$'\t' read -r blocked busy < "$f" || true; }
+  if [ "${blocked:-0}" -gt 0 ] 2>/dev/null; then printf '✋%s ▶%s' "$blocked" "${busy:-0}"
+  elif [ "${busy:-0}" -gt 0 ] 2>/dev/null; then printf '▶%s' "$busy"
+  else printf '·'; fi
+}
+
+cmd_web() {
+  local ts_ip tsout
+  case "${1:-on}" in
+    on)
+      command -v ttyd >/dev/null || { echo "installing ttyd..."; brew install ttyd; }
+      pkill -f 'ttyd.*ax-hub' 2>/dev/null; command sleep 0.3
+      # try the nice path first: HTTPS + MagicDNS via tailscale serve.
+      # NB: if Serve isn't enabled on the tailnet, the CLI prints an enable
+      # URL and then blocks polling for enablement — so probe with a timeout.
+      tailscale serve --bg 7681 </dev/null >"$AX_HOME/serve.out" 2>&1 &
+      local spid=$!; local i=0
+      while kill -0 "$spid" 2>/dev/null && [ "$i" -lt 8 ]; do command sleep 0.5; i=$((i+1)); done
+      kill "$spid" 2>/dev/null; wait "$spid" 2>/dev/null
+      tsout="$(cat "$AX_HOME/serve.out" 2>/dev/null)"
+      if printf '%s' "$tsout" | grep -q 'not enabled'; then
+        # Serve not enabled on tailnet -> bind the tailscale IP directly.
+        # Still tailnet-only and WireGuard-encrypted, just no TLS/MagicDNS.
+        ts_ip="$(tailscale ip -4 2>/dev/null | head -1)"
+        [ -z "$ts_ip" ] && { echo "tailscale not connected" >&2; return 1; }
+        (nohup ttyd -i "$ts_ip" -p 7681 -W -t fontSize=15 -t 'theme={"background":"#282a36"}' \
+          tmux new -A -s ax-hub >/dev/null 2>&1 &)
+        echo "browser terminal (tailnet-only): http://$ts_ip:7681"
+        echo "for HTTPS + a proper URL, enable Serve once as tailnet admin:"
+        printf '%s\n' "$tsout" | grep 'https://' | tr -d ' '
+      else
+        (nohup ttyd -i 127.0.0.1 -p 7681 -W -t fontSize=15 -t 'theme={"background":"#282a36"}' \
+          tmux new -A -s ax-hub >/dev/null 2>&1 &)
+        echo "browser terminal (tailnet-only): https://sohams-macbook-pro.tailab1bf3.ts.net/"
+      fi
+      ;;
+    off)
+      pkill -f 'ttyd.*ax-hub' 2>/dev/null
+      tailscale serve reset >/dev/null 2>&1
+      echo "browser terminal stopped"
+      ;;
+    *) echo "usage: ax web on|off" >&2; return 1;;
+  esac
+}
+
+case "${1:-pick}" in
+  pick|"") cmd_pick;;
+  new) cmd_new;;
+  here) cmd_here;;
+  menu) cmd_menu;;
+  path) repos | fzf --prompt='repo> ' | sed "s|^|$PROJECTS/|";;
+  status) cmd_status;;
+  repos) scan_repos; wc -l < "$CACHE" | tr -d ' '; echo "repos cached";;
+  jump) focus "${2:?pane id required}";;
+  web) shift; cmd_web "${1:-on}";;
+  panes) agent_panes;;  # debug
+  *) sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//'; exit 1;;
+esac
