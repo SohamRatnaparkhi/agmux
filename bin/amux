@@ -1,24 +1,26 @@
 #!/usr/bin/env bash
-# ax — a thin manager layer over tmux for coding agents (claude/opencode/grok/codex/pi).
+# amux — a thin manager layer over tmux for coding agents (claude/opencode/grok/codex/pi).
 # It never talks to the agents themselves; it only lists/creates tmux panes and,
 # for Claude, reads the public `claude agents --json` roster for blocked/busy glyphs.
 #
-#   ax              picker: fuzzy-jump to any running agent (blocked first)
-#   ax new          spawn an agent: pick repo -> pick agent -> optional worktree
-#   ax here         spawn an agent in the current repo (skips the repo picker)
-#   ax menu         tap-friendly tmux display-menu of agents (mobile)
-#   ax path         pick a repo, print its absolute path (for `p` shell func)
-#   ax status       tiny status-bar summary, cached ("✋2 ▶5")
-#   ax repos        refresh the repo cache
-#   ax clean        remove finished worktrees (in-use/dirty/unmerged are kept)
-#   ax web on|off   browser terminal at your tailnet URL (ttyd + tailscale serve)
-#   ax jump <pane>  focus a pane by id (used by menu)
+#   amux              picker: fuzzy-jump to any running agent (blocked first)
+#   amux new          spawn an agent: pick repo -> pick agent -> optional worktree
+#   amux here         spawn an agent in the current repo (skips the repo picker)
+#   amux menu         tap-friendly tmux display-menu of agents (mobile)
+#   amux path         pick a repo, print its absolute path (for `p` shell func)
+#   amux status       tiny status-bar summary, cached ("✋2 ▶5")
+#   amux root ...     manage which folders amux scans (add/rm/list)
+#   amux repos        rescan roots now, print how many repos were found
+#   amux clean        remove finished worktrees (in-use/dirty/unmerged are kept)
+#   amux web on|off   browser terminal at your tailnet URL (ttyd + tailscale serve)
+#   amux jump <pane>  focus a pane by id (used by menu)
 set -uo pipefail
 
-AX_HOME="$HOME/.ax"
-CACHE="$AX_HOME/repos"
-WT_DIR="$AX_HOME/worktrees"
-PROJECTS="$HOME/projects"
+AMUX_HOME="${AMUX_HOME:-$HOME/.amux}"
+CACHE="$AMUX_HOME/repos"
+WT_DIR="$AMUX_HOME/worktrees"
+ROOTS_FILE="$AMUX_HOME/roots"
+LEGACY_WT="$HOME/.ax/worktrees"   # pre-rename worktrees; still cleaned, never created
 AGENT_CHOICES="claude
 opencode
 grok
@@ -46,19 +48,69 @@ agent_ttys() {
   } | sort -u
 }
 
-mkdir -p "$AX_HOME" "$WT_DIR"
+mkdir -p "$AMUX_HOME" "$WT_DIR"
+[ -f "$ROOTS_FILE" ] || printf '%s\n' "$HOME/projects" > "$ROOTS_FILE"
 
-# ---------- repo discovery ----------
+# ---------- project roots ----------
+# Every folder listed in ~/.amux/roots is scanned for git repos. Add a root and
+# its repos appear everywhere at once; new repos created inside an existing root
+# are picked up automatically on the next rescan (hourly) with no action needed.
+roots() { grep -v '^[[:space:]]*\(#.*\)\?$' "$ROOTS_FILE" 2>/dev/null; }
+
+# cache lines are "<display-name>\t<absolute-path>"
 scan_repos() {
-  fd -H -t d --max-depth 6 '^\.git$' "$PROJECTS" 2>/dev/null \
-    | sed -e 's|/\.git/*$||' -e "s|^$PROJECTS/||" | sort > "$CACHE.tmp" \
-    && mv "$CACHE.tmp" "$CACHE"
+  local root
+  while IFS= read -r root; do
+    [ -d "$root" ] || continue
+    fd -H -t d --max-depth 6 '^\.git$' "$root" 2>/dev/null \
+      | sed -e 's|/\.git/*$||' \
+      | while IFS= read -r p; do printf '%s\t%s\n' "${p#"$root"/}" "$p"; done
+    # a root that is itself a repo counts as a project too.
+    # NB: trailing `:` keeps the loop's exit status zero — under `pipefail` a
+    # failing final test would sink the whole pipeline and skip the mv below.
+    [ -d "$root/.git" ] && printf '%s\t%s\n' "$(basename "$root")" "$root"
+    :
+  done < <(roots) | sort -u > "$CACHE.tmp" && mv "$CACHE.tmp" "$CACHE"
 }
 
-repos() {
+repos() { # display names only
   if [ ! -s "$CACHE" ]; then scan_repos
-  elif [ -n "$(find "$CACHE" -mmin +360 2>/dev/null)" ]; then (scan_repos &) fi
-  cat "$CACHE"
+  elif [ -n "$(find "$CACHE" -mmin +60 2>/dev/null)" ]; then (scan_repos &) fi
+  cut -f1 "$CACHE"
+}
+
+repo_path() { awk -F'\t' -v n="$1" '$1==n {print $2; exit}' "$CACHE"; }
+
+# write the tmux leader/prefix key chosen at install time
+set_prefix() {
+  local key="$1"
+  { printf 'unbind C-b\n'
+    printf 'set -g prefix %s\n' "$key"
+    printf 'bind %s send-prefix\n' "$key"
+  } > "$AMUX_HOME/prefix.conf"
+  tmux source-file "$HOME/.tmux.conf" 2>/dev/null
+  echo "leader key set to $key"
+}
+
+cmd_root() {
+  local sub="${1:-list}" p
+  case "$sub" in
+    add)
+      p="$(cd "${2:?usage: amux root add <path>}" 2>/dev/null && pwd)" \
+        || { echo "no such directory: $2" >&2; return 1; }
+      roots | grep -qxF "$p" && { echo "already a root: $p"; return 0; }
+      printf '%s\n' "$p" >> "$ROOTS_FILE"
+      scan_repos
+      printf 'added root %s  (%s projects known)\n' "$p" "$(wc -l < "$CACHE" | tr -d ' ')"
+      ;;
+    rm|remove)
+      p="${2:?usage: amux root rm <path>}"; p="${p%/}"
+      grep -vxF "$p" "$ROOTS_FILE" > "$ROOTS_FILE.tmp" && mv "$ROOTS_FILE.tmp" "$ROOTS_FILE"
+      scan_repos; echo "removed root $p"
+      ;;
+    list|"") roots;;
+    *) echo "usage: amux root add|rm|list [path]" >&2; return 1;;
+  esac
 }
 
 # session name: <workspace>/<leaf>, sanitized for tmux (no '.' or ':')
@@ -102,7 +154,8 @@ agent_panes() {
       idle) rank=2; glyph="·";;
       *) rank=1; glyph="▶";;
     esac
-    rel="${ppath#"$PROJECTS"/}"
+    rel="$ppath"
+    while IFS= read -r r; do case "$ppath" in "$r"/*) rel="${ppath#"$r"/}"; break;; esac; done < <(roots)
     if [ "$rel" = "$ppath" ]; then
       case "$ppath" in "$HOME"*) rel="~${ppath#"$HOME"}";; *) rel="$ppath";; esac
     fi
@@ -130,11 +183,13 @@ cmd_pick() {
 }
 
 spawn_in() { # $1 = absolute repo dir
-  local dir="$1" agent sess leaf rel task mode wt n
+  local dir="$1" agent sess leaf rel task mode wt n r
   agent="$(printf '%s\n' "$AGENT_CHOICES" | fzf --prompt='agent> ' --header="spawn in $(basename "$dir")")" || return 0
   [ -z "$agent" ] && return 0
 
-  rel="${dir#"$PROJECTS"/}"; leaf="$(basename "$dir")"
+  rel="$dir"
+  while IFS= read -r r; do case "$dir" in "$r"/*) rel="${dir#"$r"/}"; break;; esac; done < <(roots)
+  leaf="$(basename "$dir")"
   if [ "$rel" != "$dir" ]; then sess="$(sess_name "$rel")"; else sess="$(printf '%s' "$leaf" | tr '.:' '--')"; fi
 
   if ! tmux has-session -t "=$sess" 2>/dev/null; then
@@ -179,7 +234,7 @@ cmd_new() {
   local repo
   repo="$(repos | fzf --prompt='repo> ' --header='where should the agent run?')" || return 0
   [ -z "$repo" ] && return 0
-  spawn_in "$PROJECTS/$repo"
+  spawn_in "$(repo_path "$repo")"
 }
 
 # spawn in the repo you're already standing in — no repo picker
@@ -207,12 +262,12 @@ refresh_status() {
   claude agents --json 2>/dev/null | jq -r '
     [([.[] | select(.status=="waiting")] | length),
      ([.[] | select(.status=="busy" or .status=="working")] | length)] | @tsv' \
-    2>/dev/null > "$AX_HOME/status.tmp" && mv "$AX_HOME/status.tmp" "$AX_HOME/status"
+    2>/dev/null > "$AMUX_HOME/status.tmp" && mv "$AMUX_HOME/status.tmp" "$AMUX_HOME/status"
 }
 
 cmd_status() {
   # never block the status bar: print the cache, refresh in the background if stale
-  local f="$AX_HOME/status" blocked=0 busy=0 age now mtime
+  local f="$AMUX_HOME/status" blocked=0 busy=0 age now mtime
   now="$(date +%s)"; mtime="$(stat -f %m "$f" 2>/dev/null || echo 0)"
   age=$(( now - mtime ))
   [ "$age" -ge 5 ] && [ ! -f "$f.tmp" ] && (refresh_status &)
@@ -228,7 +283,7 @@ cmd_status() {
 cmd_clean() {
   local wt branch mainwt base ahead cwds removed=0 kept=0
   cwds="$(tmux list-panes -a -F '#{pane_current_path}' 2>/dev/null)"
-  for wt in "$WT_DIR"/*/; do
+  for wt in "$WT_DIR"/*/ "$LEGACY_WT"/*/; do
     [ -d "$wt" ] || continue
     wt="${wt%/}"
     if printf '%s\n' "$cwds" | awk -v p="$wt" 'index($0,p)==1{f=1} END{exit !f}'; then
@@ -268,11 +323,11 @@ cmd_web() {
       # try the nice path first: HTTPS + MagicDNS via tailscale serve.
       # NB: if Serve isn't enabled on the tailnet, the CLI prints an enable
       # URL and then blocks polling for enablement — so probe with a timeout.
-      tailscale serve --bg 7681 </dev/null >"$AX_HOME/serve.out" 2>&1 &
+      tailscale serve --bg 7681 </dev/null >"$AMUX_HOME/serve.out" 2>&1 &
       local spid=$!; local i=0
       while kill -0 "$spid" 2>/dev/null && [ "$i" -lt 8 ]; do command sleep 0.5; i=$((i+1)); done
       kill "$spid" 2>/dev/null; wait "$spid" 2>/dev/null
-      tsout="$(cat "$AX_HOME/serve.out" 2>/dev/null)"
+      tsout="$(cat "$AMUX_HOME/serve.out" 2>/dev/null)"
       if printf '%s' "$tsout" | grep -q 'not enabled'; then
         # Serve not enabled on tailnet -> bind the tailscale IP directly.
         # Still tailnet-only and WireGuard-encrypted, just no TLS/MagicDNS.
@@ -304,8 +359,10 @@ case "${1:-pick}" in
   here) cmd_here;;
   clean) cmd_clean;;
   menu) cmd_menu;;
-  path) repos | fzf --prompt='repo> ' | sed "s|^|$PROJECTS/|";;
+  path) sel="$(repos | fzf --prompt='repo> ')" && [ -n "$sel" ] && repo_path "$sel";;
   status) cmd_status;;
+  root) shift; cmd_root "$@";;
+  prefix) set_prefix "${2:?usage: amux prefix <key>   e.g. C-a, C-Space, C-b}";;
   repos) scan_repos; wc -l < "$CACHE" | tr -d ' '; echo "repos cached";;
   jump) focus "${2:?pane id required}";;
   web) shift; cmd_web "${1:-on}";;
