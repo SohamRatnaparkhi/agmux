@@ -11,11 +11,38 @@ A thin manager layer over tmux for terminal coding agents (Claude Code, opencode
 ## Install
 
 ```sh
-git clone https://github.com/SohamRatnaparkhi/agmux ~/projects/agmux
-~/projects/agmux/install.sh
+curl -fsSL https://raw.githubusercontent.com/SohamRatnaparkhi/agmux/main/install.sh | bash
 ```
 
-Idempotent; symlinks configs to the repo so `git pull` updates everything. Requires tmux ≥ 3.4, fzf, fd, jq (auto-installed via brew if missing). Tmux plugins (TPM, Dracula, resurrect, continuum, yank) auto-install on first tmux start.
+That is the whole thing. It clones to `~/.local/share/agmux`, asks once for your tmux leader key, and prints your shortcuts.
+
+**It does not touch your tmux config.** It appends exactly one `source-file` line to `~/.tmux.conf` and leaves everything else alone, because a manager layer that overwrites your config is not a layer. Four paths are touched in total:
+
+| Path | What |
+|---|---|
+| `~/.local/bin/agmux` | symlink to the checkout |
+| `~/.tmux/agents.conf` | symlink to the checkout (the key bindings) |
+| `~/.tmux.conf` | one `source-file` line appended |
+| `~/.zshrc` | one `source` line appended (the `p` / `an` helpers) |
+
+Prefer to clone yourself, or want the author's complete tmux setup (Dracula, plugins, the base bindings listed below)?
+
+```sh
+git clone https://github.com/SohamRatnaparkhi/agmux ~/projects/agmux
+~/projects/agmux/install.sh                 # just agmux
+~/projects/agmux/install.sh --full-config   # + the full tmux.conf (yours is backed up to .bak)
+```
+
+Idempotent, so re-run it any time; `git pull` updates everything through the symlinks. Requires tmux ≥ 3.4, plus fzf, fd and jq (auto-installed via brew when available).
+
+### Uninstall
+
+```sh
+~/.local/share/agmux/uninstall.sh            # keeps ~/.agmux (roots, prefix, worktrees)
+~/.local/share/agmux/uninstall.sh --purge    # removes it too
+```
+
+Removes only what the installer added, restores any `.bak` it made, and refuses to purge while worktrees still exist (run `agmux clean` first).
 
 ## Shortcuts
 
@@ -46,6 +73,8 @@ Your leader key is chosen during install (default `C-a`); change it any time wit
 | `agmux clean` | Remove finished worktrees — keeps any with an agent inside, uncommitted changes, or unmerged commits (prints the merge command for those) |
 
 ### Base tmux
+
+These ship in `tmux/tmux.conf`, so they apply only if you installed with `--full-config`.
 
 | Key | Action |
 |---|---|
@@ -80,7 +109,7 @@ Your leader key is chosen during install (default `C-a`); change it any time wit
 | Repo file | Installs to |
 |---|---|
 | `bin/agmux` | `~/.local/bin/agmux` (symlink) |
-| `tmux/tmux.conf` | `~/.tmux.conf` (symlink) |
+| `tmux/tmux.conf` | `~/.tmux.conf` (symlink) — only with `--full-config` |
 | `tmux/agents.conf` | `~/.tmux/agents.conf` (symlink) |
 | `dracula/agmux_status.sh` | `~/.tmux/plugins/tmux/scripts/` (copy — plugin updates wipe it; re-run install.sh) |
 | `zsh/agmux.zsh` | sourced from `~/.zshrc` |

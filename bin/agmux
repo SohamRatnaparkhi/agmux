@@ -369,5 +369,10 @@ case "${1:-pick}" in
   jump) focus "${2:?pane id required}";;
   web) shift; cmd_web "${1:-on}";;
   panes) agent_panes;;  # debug
-  *) sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//'; exit 1;;
+  # Print the header comment block: every line from line 2 until the first
+  # non-comment line. A hardcoded range ('2,12p') silently truncated the help
+  # the moment a command was added below line 12 — `clean`, `web`, `repos` and
+  # `jump` all existed and were undocumented because of it. This cannot drift.
+  help|-h|--help) sed -n '2,${/^#/!q;s/^# \{0,1\}//;p;}' "$0"; exit 0;;
+  *) sed -n '2,${/^#/!q;s/^# \{0,1\}//;p;}' "$0"; exit 1;;
 esac
