@@ -341,7 +341,7 @@ cmd_web() {
       else
         (nohup ttyd -i 127.0.0.1 -p 7681 -W -t fontSize=15 -t 'theme={"background":"#282a36"}' \
           tmux new -A -s ax-hub >/dev/null 2>&1 &)
-        echo "browser terminal (tailnet-only): https://sohams-macbook-pro.tailab1bf3.ts.net/"
+        echo "browser terminal (tailnet-only): https://$(tailscale status --json 2>/dev/null | jq -r '.Self.DNSName // ""' | sed 's|\.$||')/"
       fi
       ;;
     off)
