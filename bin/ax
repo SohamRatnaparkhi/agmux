@@ -165,8 +165,11 @@ spawn_in() { # $1 = absolute repo dir
         printf 'worktree failed, using shared checkout\n'; sleep 1
       fi
     fi
-    tmux new-window -t "=$sess" -n "${agent}·${task}" -c "$dir"
-    tmux send-keys -t "=$sess" "$(launch_cmd "$agent")" Enter
+    # Capture the new window's pane id and target THAT. `-t "=name"` resolves as a
+    # session/window target but NOT as a pane target, so send-keys to it silently fails.
+    local pane
+    pane="$(tmux new-window -t "=$sess" -n "${agent}·${task}" -c "$dir" -P -F '#{pane_id}')"
+    tmux send-keys -t "$pane" "$(launch_cmd "$agent")" Enter
   fi
 
   if [ -n "${TMUX:-}" ]; then tmux switch-client -t "=$sess"; else tmux attach -t "=$sess"; fi
