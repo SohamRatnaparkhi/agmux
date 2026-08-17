@@ -3,7 +3,8 @@
 # It never talks to the agents themselves; it only lists/creates tmux panes and,
 # for Claude, reads the public `claude agents --json` roster for blocked/busy glyphs.
 #
-#   agmux              picker: + new / > here (always), then running agents (blocked first)
+#   agmux              picker: type a name to jump to a live agent; + new is last
+#   agmux <words>      jump to a matching live agent (e.g. agmux turbopuffer)
 #   agmux new          spawn an agent: pick repo -> pick agent -> new/resume
 #   agmux here         spawn an agent in the current repo (skips the repo picker)
 #   agmux resume       pick a past session and restart it in the same CLI
@@ -561,14 +562,17 @@ agent_panes() {
 }
 
 focus() { # $1 = pane_id
-  local target
+  local target label
   target="$(tmux display-message -p -t "$1" '#{session_name}:#{window_index}')" || return 1
+  label="$(tmux display-message -p -t "$1" '#{window_name}')"
   tmux select-pane -t "$1"
-  # switch-client works from a popup and from a script outside tmux; attach
-  # needs a real tty and is the fallback only when no client is connected.
-  tmux switch-client -t "$target" 2>/dev/null || {
-    [ -t 0 ] && tmux attach -t "$target"
-  }
+  if tmux list-clients >/dev/null 2>&1 && [ -n "$(tmux list-clients -F '#{client_tty}' 2>/dev/null)" ]; then
+    tmux switch-client -t "$target" 2>/dev/null || true
+  elif [ -t 0 ]; then
+    tmux attach -t "$target"
+  fi
+  printf 'jumped to %s  (%s)\n' "$label" "$target"
+  follow_write "${target%%:*}" "$label"
 }
 
 # ---------- commands ----------
@@ -580,13 +584,32 @@ picker_actions() {
   printf 'search\t/  search the web\t\t\n'
 }
 
+# Jump to a live/leftover pane whose label matches the query (case-insensitive).
+cmd_jump_query() {
+  local q="$1" sel pane glyph
+  [ -n "$q" ] || return 1
+  sel="$(agent_panes | awk -F'\t' -v q="$q" 'BEGIN{IGNORECASE=1} index($2,q) || index($3,q) {print; exit}')"
+  [ -n "$sel" ] || { echo "no agent matched: $q" >&2; return 1; }
+  pane="$(printf '%s' "$sel" | awk -F'\t' '{print $4}')"
+  glyph="$(printf '%s' "$sel" | awk -F'\t' '{print $2}')"
+  if printf '%s' "$glyph" | grep -q '^○'; then
+    restart_in_pane "$pane"
+  else
+    focus "$pane"
+  fi
+}
+
 cmd_pick() {
-  local sel action pane header
-  header='tap + new then claude. n = pick a repo first. ○ leftover restarts that CLI.'
+  local sel action pane header glyph
+  header='type a name to jump (turbopuffer). + new is at the bottom. ○ leftover restarts that CLI.'
+  # Agents first so reverse-layout + Enter jumps, not spawn.
   sel="$(
     {
+      agent_panes | awk -F'\t' '
+        $2 ~ /^○/ { printf "restart\t%s\t%s\t%s\n", $2, $3, $4; next }
+        { printf "jump\t%s\t%s\t%s\n", $2, $3, $4 }
+      '
       picker_actions
-      agent_panes | awk -F'\t' '{ printf "jump\t%s\t%s\t%s\n", $2, $3, $4 }'
     } | fzf_pick --ansi --delimiter='\t' --with-nth=2,3 \
         --prompt='agents> ' --header="$header" \
         --preview='[ -n "{4}" ] && [[ "{4}" == %* ]] && tmux capture-pane -ep -t {4} | tail -25' \
@@ -595,10 +618,11 @@ cmd_pick() {
   action="$(printf '%s' "$sel" | awk -F'\t' '{print $1}')"
   pane="$(printf '%s' "$sel" | awk -F'\t' '{print $4}')"
   case "$action" in
-    new)    cmd_new ;;
-    here)   cmd_here ;;
-    search) cmd_search ;;
-    jump)   [ -n "$pane" ] && focus "$pane" ;;
+    new)     cmd_new ;;
+    here)    cmd_here ;;
+    search)  cmd_search ;;
+    jump)    [ -n "$pane" ] && focus "$pane" ;;
+    restart) restart_in_pane "$pane" ;;
   esac
 }
 
@@ -982,5 +1006,5 @@ case "${1:-pick}" in
   # the moment a command was added below line 12 — `clean`, `web`, `repos` and
   # `jump` all existed and were undocumented because of it. This cannot drift.
   help|-h|--help) sed -n '2,${/^#/!q;s/^# \{0,1\}//;p;}' "$SELF"; exit 0;;
-  *) sed -n '2,${/^#/!q;s/^# \{0,1\}//;p;}' "$SELF"; exit 1;;
+  *) cmd_jump_query "$*" ;;
 esac
