@@ -3,7 +3,7 @@
 # It never talks to the agents themselves; it only lists/creates tmux panes and,
 # for Claude, reads the public `claude agents --json` roster for blocked/busy glyphs.
 #
-#   agmux              picker: fuzzy-jump to any running agent (blocked first)
+#   agmux              picker: + new / > here (always), then running agents (blocked first)
 #   agmux new          spawn an agent: pick repo -> pick agent -> optional worktree
 #   agmux here         spawn an agent in the current repo (skips the repo picker)
 #   agmux menu         tap-friendly tmux display-menu of agents (mobile)
@@ -175,13 +175,31 @@ focus() { # $1 = pane_id
 }
 
 # ---------- commands ----------
+# Always-on action rows for the agents picker. These sit above live panes so
+# a swept-empty list is still a spawn menu, never a dead 0/0 prompt.
+picker_actions() {
+  printf 'new\t+  new agent\t\t\n'
+  printf 'here\t>  spawn here\t\t\n'
+}
+
 cmd_pick() {
-  local sel pane
-  sel="$(agent_panes | fzf --ansi --delimiter='\t' --with-nth=2,3 \
-        --prompt='agents> ' --header='enter: jump · agents sorted blocked-first' \
-        --preview='tmux capture-pane -ep -t {4} | tail -25' --preview-window=down,60%)" || return 0
+  local sel action pane
+  sel="$(
+    {
+      picker_actions
+      agent_panes | awk -F'\t' '{ printf "jump\t%s\t%s\t%s\n", $2, $3, $4 }'
+    } | fzf --ansi --delimiter='\t' --with-nth=2,3 \
+        --prompt='agents> ' --header='enter: jump · + new · > here · blocked first' \
+        --preview='[ -n "{4}" ] && [[ "{4}" == %* ]] && tmux capture-pane -ep -t {4} | tail -25' \
+        --preview-window=down,60%
+  )" || return 0
+  action="$(printf '%s' "$sel" | awk -F'\t' '{print $1}')"
   pane="$(printf '%s' "$sel" | awk -F'\t' '{print $4}')"
-  [ -n "$pane" ] && focus "$pane"
+  case "$action" in
+    new)  cmd_new ;;
+    here) cmd_here ;;
+    jump) [ -n "$pane" ] && focus "$pane" ;;
+  esac
 }
 
 spawn_in() { # $1 = absolute repo dir
