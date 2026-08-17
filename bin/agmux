@@ -562,17 +562,22 @@ agent_panes() {
 }
 
 focus() { # $1 = pane_id
-  local target label
+  local target label sess
   target="$(tmux display-message -p -t "$1" '#{session_name}:#{window_index}')" || return 1
   label="$(tmux display-message -p -t "$1" '#{window_name}')"
+  sess="${target%%:*}"
   tmux select-pane -t "$1"
-  if tmux list-clients >/dev/null 2>&1 && [ -n "$(tmux list-clients -F '#{client_tty}' 2>/dev/null)" ]; then
+  follow_write "$sess" "$label"
+  # Already inside tmux: move this client. Do not attach (that would nest).
+  if [ -n "${TMUX:-}" ]; then
     tmux switch-client -t "$target" 2>/dev/null || true
-  elif [ -t 0 ]; then
-    tmux attach -t "$target"
+    printf 'jumped to %s  (%s)\n' "$label" "$target"
+    return 0
   fi
-  printf 'jumped to %s  (%s)\n' "$label" "$target"
-  follow_write "${target%%:*}" "$label"
+  # Ran from a normal shell (new Ghostty tab, etc.). Attach THIS terminal
+  # so Enter actually enters the session instead of printing and staying at ~.
+  [ -t 0 ] || { printf 'jumped to %s  (%s)\n' "$label" "$target"; return 0; }
+  exec tmux attach -t "=$sess" \; select-window -t "$target" \; select-pane -t "$1"
 }
 
 # ---------- commands ----------
