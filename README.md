@@ -56,9 +56,9 @@ Your leader key is chosen during install (default `C-a`); change it any time wit
 | Key | Action |
 |---|---|
 | `<leader> a` | Agent picker: `+ new` / `> here` always, then fuzzy jump (blocked-first) |
-| `<leader> A` | Spawn agent **in the current repo** (skips repo picker) |
-| `<leader> n` | Spawn agent: pick repo → agent → new / continue / pick session |
-| `<leader> m` | Full-screen menu: new, here, sweep, live jump, tap ○ to restart that CLI |
+| `<leader> A` | Spawn agent in the current repo (pick Claude / Grok / …) |
+| `<leader> n` | Spawn: pick repo, then agent |
+| `<leader> m` | Menu: **+ new agent** picks the CLI next (current repo). `n` if you need a different repo. |
 | `<leader> e` | Resume a past session in the same CLI |
 | `<leader> w` | Search the web (opens your default browser) |
 | `<leader> x` | Sweep inactive agents and leftover agent-only sessions (never the one you are in) |

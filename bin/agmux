@@ -297,6 +297,24 @@ short_path() {
   esac
 }
 
+# display-popup restores the client when it closes, which undoes switch-client
+# done inside the popup. Write the target here; `agmux follow` runs after the
+# popup exits (see agents.conf) and lands on the new window.
+follow_write() { # sess window_name
+  printf '%s\n%s\n' "$1" "${2:-}" > "$AGMUX_HOME/follow"
+}
+
+cmd_follow() {
+  local sess win
+  [ -f "$AGMUX_HOME/follow" ] || return 0
+  { IFS= read -r sess; IFS= read -r win; } < "$AGMUX_HOME/follow" || true
+  rm -f "$AGMUX_HOME/follow"
+  [ -n "$sess" ] || return 0
+  tmux has-session -t "=$sess" 2>/dev/null || return 0
+  tmux switch-client -t "=$sess" 2>/dev/null || true
+  [ -n "$win" ] && tmux select-window -t "=$sess:$win" 2>/dev/null || true
+}
+
 # Start the agent as the window command (not send-keys into a racing shell).
 # When the agent exits, exec the user's shell so the window stays as ○ leftover.
 start_agent_window() { # sess dir name launch
@@ -306,6 +324,7 @@ start_agent_window() { # sess dir name launch
     "$launch; exec $shell")" \
     || { echo "failed to open tmux window in $sess" >&2; return 1; }
   tmux set-window-option -t "$(tmux display-message -p -t "$pane" '#{window_id}')" automatic-rename off
+  follow_write "$sess" "$name"
   printf '%s' "$pane"
 }
 
@@ -327,6 +346,7 @@ open_history() { # agent id cwd title
     tmux set-window-option -t "=$sess:shell" automatic-rename off
   fi
   start_agent_window "$sess" "$dir" "${agent}·${task}" "$(resume_cmd "$agent" "$id")" >/dev/null || return 1
+  follow_write "$sess" "${agent}·${task}"
   tmux switch-client -t "=$sess" 2>/dev/null || {
     [ -t 0 ] && tmux attach -t "$sess"
   }
@@ -555,14 +575,14 @@ focus() { # $1 = pane_id
 # Always-on action rows for the agents picker. These sit above live panes so
 # a swept-empty list is still a spawn menu, never a dead 0/0 prompt.
 picker_actions() {
-  printf 'new\t+  new agent\t\t\n'
-  printf 'here\t>  spawn here\t\t\n'
+  printf 'here\t+  new agent\t\t\n'
+  printf 'new\tn  pick repo, then agent\t\t\n'
   printf 'search\t/  search the web\t\t\n'
 }
 
 cmd_pick() {
   local sel action pane header
-  header='tap/enter: jump · + new · > here · blocked first · ○ leftover (chat kept)'
+  header='tap + new then claude. n = pick a repo first. ○ leftover restarts that CLI.'
   sel="$(
     {
       picker_actions
@@ -624,6 +644,7 @@ spawn_in() { # $1 = absolute repo dir  $2 = optional start mode (new|continue|pi
     start_agent_window "$sess" "$dir" "${agent}·${task}" "$(launch_cmd "$agent" "$start")" >/dev/null || return 1
   fi
 
+  follow_write "$sess" "${agent}·${task}"
   tmux switch-client -t "=$sess" 2>/dev/null || {
     [ -t 0 ] && tmux attach -t "$sess"
   }
@@ -693,7 +714,7 @@ cmd_menu() {
       '
     } | fzf_pick --delimiter='\t' --with-nth=2 \
           --prompt='agmux> ' \
-          --header='+ new  > here  ↩ resume  / search  x sweep. tap ○ to restart that same CLI.' \
+          --header='+ new agent → pick claude/grok/…. ↩ resume. / search. x sweep.' \
           --preview='[ -n "{4}" ] && [[ "{4}" == %* ]] && tmux capture-pane -ep -t {4} | tail -20' \
           --preview-window=down,35%
   )" || return 0
@@ -944,6 +965,7 @@ case "${1:-pick}" in
   here) cmd_here;;
   resume) cmd_resume;;
   search) cmd_search;;
+  follow) cmd_follow;;
   sweep) shift; cmd_sweep "$@";;
   clean) cmd_clean;;
   menu) cmd_menu;;
