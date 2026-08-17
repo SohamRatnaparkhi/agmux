@@ -2,7 +2,7 @@
 
 A thin manager layer over tmux for terminal coding agents (Claude Code, opencode, grok, codex, pi). It never wraps or replaces the agents' own UIs — it only finds, spawns, and jumps between them, from a laptop keyboard or a phone tap.
 
-- **Picker**: every running agent across all sessions, blocked-first, live pane preview
+- **Picker**: `+ new agent` and `> spawn here` are pinned at the top so a swept-empty list is still a spawn menu, never a dead `0/0`. Under that: every running agent across all sessions, blocked-first, live pane preview
 - **Spawn**: repo → agent → task, with automatic git-worktree isolation when a repo already hosts an agent
 - **Status**: `✋2 ▶5` (blocked / working) in the tmux status bar, fed by `claude agents --json` (cached, async, never blocks rendering); codex blocked-state read from its own terminal title
 - **Mobile**: tap the status bar in any SSH client or the browser terminal — no keyboard chords
@@ -52,7 +52,7 @@ Your leader key is chosen during install (default `C-a`); change it any time wit
 
 | Key | Action |
 |---|---|
-| `<leader> a` | Agent picker — fuzzy, blocked-first, preview, Enter jumps |
+| `<leader> a` | Agent picker — `+ new` / `> here` always, then fuzzy jump (blocked-first) |
 | `<leader> A` | Spawn agent **in the current repo** (skips repo picker) |
 | `<leader> n` | Spawn agent — pick repo → agent → task name |
 | `<leader> m` | Compact agent menu |
